@@ -38,7 +38,10 @@ STYLES = """
 .success-card { background: linear-gradient(135deg, #052e16, #064e3b); border: 1px solid #10b98155; border-radius: 16px; padding: 28px 24px; text-align: center; margin: 16px 0; }
 .success-title { font-size: 1.3rem; font-weight: 800; color: #34d399; margin: 10px 0 4px; }
 div[data-testid="stFileUploader"] { border: 2px dashed #4338ca66 !important; border-radius: 14px !important; background: #0f172a88 !important; padding: 8px !important; }
-.stButton > button { width: 100% !important; background: linear-gradient(135deg, #6366f1, #8b5cf6) !important; color: white !important; border: none !important; border-radius: 10px !important; font-weight: 700 !important; }
+button[kind="primary"] { width: 100% !important; background: linear-gradient(135deg, #6366f1, #8b5cf6) !important; color: white !important; border: none !important; border-radius: 10px !important; font-weight: 700 !important; }
+button[kind="secondary"] { width: 100% !important; background: #1e1b4b !important; color: #f87171 !important; border: 1px solid #4338ca55 !important; border-radius: 8px !important; font-weight: bold !important; transition: all 0.2s; height: 38px;}
+button[kind="secondary"]:hover { background: #ef4444 !important; color: white !important; }
+.ch-item:hover { background: #1e293b; border-left-color: #8b5cf6; cursor: default; }
 </style>
 """
 st.markdown(STYLES, unsafe_allow_html=True)
@@ -216,39 +219,58 @@ class UniversalAnalyzer:
 # 0% DATA LOSS SPLITTING ENGINE (Bulletproof Slicing)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_safe_split_points(candidates: list[dict], max_chapters: int, auto: bool, total_pages: int) -> list[int]:
+def sanitize_filename(name: str) -> str:
+    if not name:
+        return "Section"
+    # Remove invalid characters for Windows/Linux/Mac filenames
+    clean_name = re.sub(r'[\\/*?:"<>|]', "", name)
+    # Remove leading/trailing spaces and dots
+    clean_name = clean_name.strip(". ")
+    # Limit length
+    clean_name = clean_name[:100]
+    return clean_name if clean_name else "Section"
+
+def get_safe_split_points(candidates: list[dict], max_chapters: int, auto: bool, total_pages: int) -> list[dict]:
     if not candidates or max_chapters <= 1:
         step = max(1, total_pages // max(max_chapters, 1))
-        return list(range(0, total_pages, step))
+        return [{"page": p, "title": f"Part_{i+1:02d}"} for i, p in enumerate(range(0, total_pages, step))]
         
-    pages = sorted(list(set(c["page"] for c in candidates)))
+    unique_candidates = []
+    seen_pages = set()
+    for c in candidates:
+        if c["page"] not in seen_pages:
+            unique_candidates.append(c)
+            seen_pages.add(c["page"])
+            
+    unique_candidates.sort(key=lambda x: x["page"])
     
-    if not auto and len(pages) > max_chapters:
-        step = len(pages) / max_chapters
-        pages = [pages[int(i * step)] for i in range(max_chapters)]
+    if not auto and len(unique_candidates) > max_chapters:
+        step = len(unique_candidates) / max_chapters
+        unique_candidates = [unique_candidates[int(i * step)] for i in range(max_chapters)]
         
-    return pages
+    return unique_candidates
 
-def split_pdf_safely(doc: fitz.Document, split_points: list[int]) -> list[tuple[str, bytes]]:
+def split_pdf_safely(doc: fitz.Document, split_points: list[dict]) -> list[tuple[str, bytes]]:
     total_pages = len(doc)
-    points = sorted(list(set(max(0, p) for p in split_points)))
+    points = sorted(split_points, key=lambda x: max(0, x["page"]))
     
-    if not points or points[0] != 0:
-        points.insert(0, 0)
+    if not points or points[0]["page"] != 0:
+        points.insert(0, {"page": 0, "title": points[0]["title"] if points else "Start"})
         
-    points.append(total_pages)
     results = []
     
-    for i in range(len(points) - 1):
-        start = points[i]
-        end = points[i+1] - 1  
+    for i in range(len(points)):
+        start = points[i]["page"]
+        end = points[i+1]["page"] - 1 if i + 1 < len(points) else total_pages - 1
         
         if start > end: continue 
         
         new_doc = fitz.open()
         new_doc.insert_pdf(doc, from_page=start, to_page=end)
         
-        fname = f"Section_{i + 1:02d}.pdf"
+        safe_title = sanitize_filename(points[i].get("title", f"Section_{i + 1:02d}"))
+        fname = f"{i + 1:02d} - {safe_title}.pdf"
+        
         pdf_bytes = new_doc.tobytes(garbage=4, deflate=True)
         new_doc.close()
         
@@ -273,7 +295,7 @@ def _fmt_size(n_bytes: int) -> str:
 for _key in ("pdf_bytes", "pdf_name", "analysis", "split_result"):
     if _key not in st.session_state: st.session_state[_key] = None
 
-st.markdown('<div class="pro-title">📚 Universal PDF Splitter</div>', unsafe_allow_html=True)
+st.markdown('<div class="pro-title">Universal PDF Splitter</div>', unsafe_allow_html=True)
 st.markdown('<div class="pro-subtitle">0% Data Loss · Extracts Parts & Nested Chapters</div>', unsafe_allow_html=True)
 
 st.markdown("""<div class="step-pill"><span class="step-num">1</span>📂 Upload your PDF</div>""", unsafe_allow_html=True)
@@ -288,12 +310,16 @@ if uploaded:
 if st.session_state.pdf_bytes:
     st.markdown("""<div class="step-pill"><span class="step-num">2</span>🔍 Analyze Book Pattern</div>""", unsafe_allow_html=True)
 
-    if st.button("🔍 Find Parts & Chapters", use_container_width=True):
+    if st.button("🔍 Find Parts & Chapters", use_container_width=True, type="primary"):
         with st.spinner("Scanning Deep Hierarchy..."):
             doc = fitz.open(stream=st.session_state.pdf_bytes, filetype="pdf")
-            st.session_state.analysis = UniversalAnalyzer(doc).analyze()
+            analysis_result = UniversalAnalyzer(doc).analyze()
+            for i, c in enumerate(analysis_result.get("candidates", [])):
+                c["_id"] = i
+            st.session_state.analysis = analysis_result
             doc.close()
             st.session_state.split_result = None
+            st.session_state.pop("chapter_editor", None)  # Reset data editor state on new analysis
 
 if st.session_state.analysis:
     a = st.session_state.analysis
@@ -316,25 +342,54 @@ if st.session_state.analysis:
 
     candidates = a.get("candidates", [])
     if candidates:
-        items_html = "".join([f'<div class="ch-item"><span class="ch-title">{c["title"][:60]}</span><span class="ch-badge">p.{c["display_page"]}</span></div>' for c in candidates[:15]])
-        more = f'<div style="color:#475569;font-size:0.78rem;margin-top:8px;">+ {len(candidates)-15} more sections</div>' if len(candidates) > 15 else ""
-        st.markdown(f'<div class="card"><div class="card-title">📑 Detected Boundaries (Preview)</div>{items_html}{more}</div>', unsafe_allow_html=True)
+        st.markdown('<div class="card" style="margin-bottom:0px;"><div class="card-title" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;"><span style="font-weight:700;">📑 Selected Sections</span><span style="font-size:0.75rem;color:#64748b;">(Click ❌ to remove)</span></div>', unsafe_allow_html=True)
+        
+        if "deleted_ids" not in st.session_state:
+            st.session_state.deleted_ids = set()
+            
+        selected_candidates = []
+        for i, c in enumerate(candidates):
+            c_id = c.get("_id", i)
+            if c_id in st.session_state.deleted_ids:
+                continue
+                
+            selected_candidates.append(c)
+            
+            cols = st.columns([10, 1.5])
+            with cols[0]:
+                st.markdown(f'<div class="ch-item" style="margin: 0 0 8px 0;"><span class="ch-title">{c["title"][:60]}</span><span class="ch-badge">p.{c["display_page"]}</span></div>', unsafe_allow_html=True)
+            with cols[1]:
+                if st.button("❌", key=f"del_{c_id}", help="Remove section"):
+                    st.session_state.deleted_ids.add(c_id)
+                    st.rerun()
+                    
+        st.session_state.selected_candidates = selected_candidates
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        if st.session_state.deleted_ids:
+            if st.button("↺ Restore Removed Sections", key="restore_all", type="secondary"):
+                st.session_state.deleted_ids = set()
+                st.rerun()
     else:
         st.warning("⚠️ No standard chapters found. The PDF will be split evenly.")
+        st.session_state.selected_candidates = []
 
 if st.session_state.analysis:
     st.markdown("""<div class="step-pill"><span class="step-num">3</span>✂️ Configure Split</div>""", unsafe_allow_html=True)
     a = st.session_state.analysis
     
+    sel_count = len(st.session_state.get("selected_candidates", []))
+    
     col_l, col_r = st.columns([1, 1], gap="medium")
     with col_l:
-        mode = st.radio("Split Mode:", [f"🤖 Auto ({a['candidate_count']} files)", "✏️ Manual Splits"], index=0, disabled=(a['candidate_count']==0))
+        mode = st.radio("Split Mode:", [f"🤖 Use Selected ({sel_count} sections)", "✏️ Manual Splits (Even)"], index=0, disabled=(sel_count==0))
     with col_r:
-        manual_n = st.number_input("Total Output Files:", min_value=2, max_value=200, value=max(2, a['candidate_count']), disabled=mode.startswith("🤖"))
+        manual_n = st.number_input("Total Output Files (Manual):", min_value=2, max_value=200, value=max(2, sel_count), disabled=mode.startswith("🤖"))
 
-    if st.button("✂️ Slice & Generate PDFs", use_container_width=True):
+    if st.button("✂️ Slice & Generate PDFs", use_container_width=True, type="primary"):
         with st.spinner("Slicing PDF without data loss..."):
-            pts = get_safe_split_points(a.get("candidates", []), int(manual_n), mode.startswith("🤖"), a["total_pages"])
+            cands_to_use = st.session_state.selected_candidates if mode.startswith("🤖") else []
+            pts = get_safe_split_points(cands_to_use, int(manual_n), mode.startswith("🤖"), a["total_pages"])
             doc = fitz.open(stream=st.session_state.pdf_bytes, filetype="pdf")
             chaps = split_pdf_safely(doc, pts)
             doc.close()
